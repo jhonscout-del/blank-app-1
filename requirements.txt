@@ -1,1 +1,3 @@
 streamlit
+O365
+streamlit-local-storage
