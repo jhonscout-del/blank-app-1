@@ -6,7 +6,6 @@ import os
 
 # --- 1. CONFIGURACIÓN DE SEGURIDAD (Secrets) ---
 try:
-    # Cargar credenciales desde st.secrets
     client_id = st.secrets["client_id"]
     client_secret = st.secrets["client_secret"]
     tenant_id = st.secrets["tenant_id"]
@@ -14,8 +13,7 @@ try:
     credentials = (client_id, client_secret)
     protocolo_scopes = ['mail.send', 'calendars.readwrite']
     
-    # LÓGICA PARA EL TOKEN EN LA NUBE
-    # Si el token existe en Secrets, lo escribimos en un archivo temporal para la librería O365
+    # LÓGICA AUTOMÁTICA PARA EL TOKEN EN LA NUBE
     if "token" in st.secrets:
         with open("o365_token.txt", "w") as f:
             f.write(st.secrets["token"]["token_data"])
@@ -42,23 +40,27 @@ with st.form("main_form"):
     with col1:
         st.subheader("Información del Personal")
         nombres = st.text_input("1. Nombres y apellidos")
-        area = st.selectbox("2. Área", options=AREAS)
+        area = st.selectbox("2. Área a la que pertenece", options=AREAS)
         jefe = st.text_input("3. Jefe inmediato")
         st.subheader("Tiempos de Misión")
-        f_salida = st.date_input("5. Fecha Salida", value=datetime.now())
-        f_llegada = st.datetime_input("6. Llegada estimada (Alarma)", value=datetime.now() + timedelta(hours=2))
-        f_retorno = st.datetime_input("7. Finalización (Retorno)", value=datetime.now() + timedelta(days=1))
+        f_salida = st.date_input("5. Fecha inicio de misión (salida)", value=datetime.now())
+        f_llegada = st.datetime_input("6. Fecha y hora estimada de llegada", value=datetime.now() + timedelta(hours=2))
+        f_retorno = st.datetime_input("7. Fecha finalización misión (retorno)", value=datetime.now() + timedelta(days=1))
     with col2:
         st.subheader("Destino y Motivo")
-        origen = st.text_input("9. Origen")
-        destino = st.text_input("10. Destino")
-        motivo = st.text_area("8. Objetivo")
-        riesgo = st.selectbox("13. Riesgo", options=RIESGOS)
+        origen = st.text_input("9. Lugar de Origen")
+        destino = st.text_input("10. Destino (Municipio, veredas, etc.)")
+        motivo = st.text_area("8. Objetivo de la misión")
+        riesgo = st.selectbox("13. Evaluación de riesgo de la ruta", options=RIESGOS)
     st.divider()
-    modo = st.selectbox("11. Transporte", options=TRANSPORTES)
-    detalles_t = st.text_input("12. Detalles Transporte")
-    emergencia = st.text_input("16. Emergencia (Nombre/Tel)")
-    correos_v = st.text_input("17. Correo adicional (Opcional)")
+    st.subheader("Transporte y Notificación")
+    c1, c2 = st.columns(2)
+    with c1:
+        modo = st.selectbox("11. Tipo de transporte", options=TRANSPORTES)
+        detalles_t = st.text_input("12. Detalles del transporte (Placa, modelo o número)")
+    with c2:
+        emergencia = st.text_input("16. Contacto de emergencia (Nombre y Teléfono)")
+        correos_v = st.text_input("17. Correo adicional para notificación (opcional)")
     
     enviar = st.form_submit_button("💾 GUARDAR REPORTE (MODO OFFLINE)")
     if enviar:
@@ -73,36 +75,70 @@ with st.form("main_form"):
             "riesgo": riesgo, "emergencia": emergencia, "correos": correos_v
         }
         localS.setItem(reporte_id, datos)
-        st.success(f"✅ Guardado localmente. Alarma: {f_llegada.strftime('%H:%M')}")
+        st.success(f"✅ Guardado localmente. Alarma para las {f_llegada.strftime('%H:%M')}")
 
-# --- 4. SINCRONIZACIÓN ---
+# --- 4. LÓGICA DE SINCRONIZACIÓN ---
 st.sidebar.header("Panel de Sincronización")
 if st.sidebar.button("🔄 Sincronizar con Outlook y Enviar"):
     pendientes = localS.getAll()
     if pendientes:
-        # Intentar autenticar usando el archivo generado por los Secrets
         if not account.is_authenticated:
-            st.sidebar.warning("Autenticando... Por favor espera.")
             account.authenticate(scopes=protocolo_scopes)
             
         for clave, r in list(pendientes.items()):
             if not isinstance(r, dict) or 'llegada_iso' not in r: continue
             try:
                 dt_llegada = datetime.fromisoformat(r['llegada_iso'])
-                # CALENDARIO
+                
+                # A. CALENDARIO
                 cal = account.schedule().get_default_calendar()
                 ev = cal.new_event()
-                ev.subject = f"🚨 LLEGADA: {r.get('nombres')}"; ev.start = dt_llegada; ev.end = dt_llegada + timedelta(minutes=30); ev.save()
-                # CORREO
+                ev.subject = f"🚨 LLEGADA TERRENO: {r.get('nombres')}"
+                ev.start = dt_llegada
+                ev.end = dt_llegada + timedelta(minutes=30)
+                ev.remind_before_minutes = 15
+                ev.save()
+                
+                # B. CORREO ELECTRÓNICO (TABLA COMPLETA)
                 msg = account.new_message()
-                destinos = [c.strip() for c in r.get('correos', '').split(",") if "@" in c]
-                destinos.append("gerente.seguridad@colombiasinminas.org")
-                msg.to.add(destinos); msg.subject = f"REPORTE: {r.get('nombres')} -> {r.get('destino')}"
-                msg.body = f"<html><body><h2>Reporte de Movilidad</h2><table border='1' style='border-collapse: collapse; width: 100%;'><tr><td><b>Funcionario</b></td><td>{r.get('nombres')}</td></tr><tr><td><b>Área</b></td><td>{r.get('area')}</td></tr><tr><td><b>Destino</b></td><td>{r.get('destino')}</td></tr><tr style='background:#fff3cd;'><td><b>Llegada</b></td><td><b>{dt_llegada.strftime('%d/%m/%Y %H:%M')}</b></td></tr><tr><td><b>Riesgo</b></td><td>{r.get('riesgo')}</td></tr><tr><td><b>Transporte</b></td><td>{r.get('transporte')}</td></tr><tr><td><b>Emergencia</b></td><td>{r.get('emergencia')}</td></tr></table></body></html>"
-                msg.content_subtype = 'html'; msg.send()
+                lista_correos = [c.strip() for c in r.get('correos', '').split(",") if "@" in c]
+                lista_correos.append("gerente.seguridad@colombiasinminas.org")
+                
+                msg.to.add(lista_correos)
+                msg.subject = f"REPORTE MOVILIDAD: {r.get('nombres')} -> {r.get('destino')}"
+                
+                tabla_html = f"""
+                <html>
+                <body style="font-family: Arial, sans-serif; color: #333;">
+                    <div style="max-width: 700px; border: 1px solid #ddd; padding: 20px; border-radius: 8px;">
+                        <h2 style="color: #1a4a7a; border-bottom: 2px solid #1a4a7a;">Detalles de Movilización Reportada</h2>
+                        <table border="0" style="width: 100%; border-collapse: collapse;">
+                            <tr style="background-color: #f9f9f9;"><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>1. Funcionario</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('nombres')}</td></tr>
+                            <tr><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>2. Área</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('area')}</td></tr>
+                            <tr style="background-color: #f9f9f9;"><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>3. Jefe inmediato</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('jefe')}</td></tr>
+                            <tr><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>5. Fecha Salida</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('salida')}</td></tr>
+                            <tr style="background-color: #fff3cd;"><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>6. Llegada Estimada (Alarma)</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>{dt_llegada.strftime('%d/%m/%Y %H:%M')}</b></td></tr>
+                            <tr><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>7. Finalización/Retorno</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('retorno')}</td></tr>
+                            <tr style="background-color: #f9f9f9;"><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>8. Objetivo de Misión</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('motivo')}</td></tr>
+                            <tr><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>9. Origen</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('origen')}</td></tr>
+                            <tr style="background-color: #f9f9f9;"><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>10. Destino</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('destino')}</td></tr>
+                            <tr><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>11. Transporte</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('transporte')}</td></tr>
+                            <tr style="background-color: #f9f9f9;"><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>13. Evaluación de Riesgo</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('riesgo')}</td></tr>
+                            <tr><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>16. Emergencia</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('emergencia')}</td></tr>
+                            <tr style="background-color: #f9f9f9;"><td style="padding: 10px; border-bottom: 1px solid #eee;"><b>17. Notificados Adicionales</b></td><td style="padding: 10px; border-bottom: 1px solid #eee;">{r.get('correos') if r.get('correos') else 'Ninguno'}</td></tr>
+                        </table>
+                        <p style="font-size: 0.8em; color: #777; margin-top: 20px; text-align: center;">Reporte sincronizado automáticamente desde el Sistema de Movilidad.</p>
+                    </div>
+                </body>
+                </html>
+                """
+                msg.body = tabla_html
+                msg.content_subtype = 'html'
+                msg.send()
+
                 localS.deleteItem(clave)
                 st.sidebar.success(f"✔️ {r.get('nombres')} enviado")
             except Exception as e:
-                st.sidebar.error(f"Error en envío {clave}: {e}")
+                if "subscriptable" not in str(e): st.sidebar.error(f"Error: {e}")
     else:
         st.sidebar.info("Sin reportes pendientes.")
